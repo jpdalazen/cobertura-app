@@ -136,9 +136,12 @@ async function calcular() {
   };
 }
 
-export async function GET() {
+export async function GET(request) {
   try {
-    if (cache && Date.now() - cache.at < CACHE_MS) {
+    const url = new URL(request.url);
+    const forceRefresh = url.searchParams.has("refresh");
+
+    if (!forceRefresh && cache && Date.now() - cache.at < CACHE_MS) {
       return NextResponse.json({ ...cache.data, _cached: true });
     }
     const data = await calcular();
