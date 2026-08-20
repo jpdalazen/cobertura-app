@@ -72,7 +72,7 @@ export default function Home() {
     setErro(null);
     try {
       const url = forcarNoCache
-        ? `/api/cobertura?t=${Date.now()}`
+        ? `/api/cobertura?refresh=1&t=${Date.now()}`
         : "/api/cobertura";
       const resp = await fetch(url);
       const json = await resp.json();
