@@ -2,12 +2,6 @@
 
 import { useEffect, useState } from "react";
 
-function classePct(pct) {
-  if (pct < 40) return { texto: "pct-bad", barra: "bar-bad" };
-  if (pct < 70) return { texto: "pct-warn", barra: "bar-warn" };
-  return { texto: "pct-good", barra: "bar-good" };
-}
-
 function formatarQuando(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -21,7 +15,6 @@ function formatarQuando(iso) {
 
 function VendorCard({ v }) {
   const [aberto, setAberto] = useState(false);
-  const cor = classePct(v.pct_cobertura);
 
   return (
     <section className="card">
@@ -30,11 +23,11 @@ function VendorCard({ v }) {
         <span className="card-total">{v.total_carteira} clientes</span>
       </div>
 
-      <div className={`big-pct ${cor.texto}`}>{v.pct_cobertura}%</div>
+      <div className="big-pct">{v.pct_cobertura}%</div>
 
       <div className="bar">
         <div
-          className={`bar-fill ${cor.barra}`}
+          className="bar-fill"
           style={{ width: `${v.pct_cobertura}%` }}
         />
       </div>
@@ -117,8 +110,6 @@ export default function Home() {
       </div>
     );
   }
-
-  const corGeral = classePct(data.pct_cobertura_geral);
 
   return (
     <div className="page">
