@@ -45,7 +45,7 @@ function nomeMesAtual() {
   return `${meses[agora.getMonth()]} de ${agora.getFullYear()}`;
 }
 
-async function calcular() {
+async function calcular({ debug = false } = {}) {
   if (!TOKEN) {
     return { erro: "Token do Pipedrive não configurado no servidor." };
   }
@@ -58,20 +58,14 @@ async function calcular() {
     )
   );
 
-  // Todos os deals do funil de Vendas (sem filtro de data — precisamos
-  // deles para saber a qual org/dono uma atividade pertence, mesmo que
-  // o deal tenha sido criado em outro mês).
   const dealsPromise = fetchAllPaginated(
     `${BASE}/deals?pipeline_id=${PIPELINE_VENDAS_ID}&status=all_not_deleted`
   );
 
-  // Atividades concluídas. Filtramos por data como otimização (due_date),
-  // mas o corte real é feito depois usando marked_as_done_time.
-  const dataIni = inicio.toISOString().split("T")[0];
-  const dataFim = fim.toISOString().split("T")[0];
-  const activitiesPromise = fetchAllPaginated(
-    `${BASE}/activities?done=1&start_date=${dataIni}&end_date=${dataFim}`
-  );
+  // Busca SEM start_date/end_date propositalmente no modo debug, pra não
+  // arriscar cortar atividades por causa do filtro de due_date. Filtramos
+  // tudo manualmente abaixo, usando marked_as_done_time.
+  const activitiesPromise = fetchAllPaginated(`${BASE}/activities?done=1`);
 
   const [dealsResult, activitiesResult, ...orgsResults] = await Promise.all([
     dealsPromise,
@@ -89,20 +83,79 @@ async function calcular() {
     });
   }
 
-  // Quais organizações tiveram ao menos 1 atividade realizada neste mês,
-  // em um deal do funil de Vendas, agrupado por dono do deal.
+  // --- Contadores de diagnóstico ---
+  const diag = {
+    total_activities_buscadas: activitiesResult.length,
+    sem_done: 0,
+    sem_deal_id: 0,
+    deal_id_nao_encontrado_na_lista_de_deals: 0,
+    sem_marked_as_done_time: 0,
+    fora_do_intervalo_do_mes: 0,
+    deal_sem_org: 0,
+    deal_sem_owner: 0,
+    contabilizadas: 0,
+    amostra_atividades_ignoradas: [], // até 5 exemplos p/ inspecionar
+  };
+
+  function registrarAmostra(motivo, a) {
+    if (diag.amostra_atividades_ignoradas.length < 10) {
+      diag.amostra_atividades_ignoradas.push({
+        motivo,
+        id: a.id,
+        done: a.done,
+        deal_id: a.deal_id,
+        marked_as_done_time: a.marked_as_done_time,
+        due_date: a.due_date,
+        type: a.type,
+      });
+    }
+  }
+
   const orgsTrabalhadasPorOwner = new Map();
   for (const a of activitiesResult) {
-    if (!a.done || !a.deal_id || !a.marked_as_done_time) continue;
+    if (!a.done) {
+      diag.sem_done++;
+      registrarAmostra("sem_done", a);
+      continue;
+    }
+    if (!a.deal_id) {
+      diag.sem_deal_id++;
+      registrarAmostra("sem_deal_id", a);
+      continue;
+    }
+    if (!a.marked_as_done_time) {
+      diag.sem_marked_as_done_time++;
+      registrarAmostra("sem_marked_as_done_time", a);
+      continue;
+    }
 
     const quando = new Date(a.marked_as_done_time);
-    if (quando < inicio || quando >= fim) continue;
+    if (quando < inicio || quando >= fim) {
+      diag.fora_do_intervalo_do_mes++;
+      registrarAmostra("fora_do_intervalo_do_mes", a);
+      continue;
+    }
 
     const deal = dealsPorId.get(a.deal_id);
-    if (!deal || !deal.org_id?.value) continue;
+    if (!deal) {
+      diag.deal_id_nao_encontrado_na_lista_de_deals++;
+      registrarAmostra("deal_id_nao_encontrado_na_lista_de_deals", a);
+      continue;
+    }
+    if (!deal.org_id?.value) {
+      diag.deal_sem_org++;
+      registrarAmostra("deal_sem_org", a);
+      continue;
+    }
 
     const owner = deal.user_id?.value ?? deal.owner_id?.id;
-    if (!owner) continue;
+    if (!owner) {
+      diag.deal_sem_owner++;
+      registrarAmostra("deal_sem_owner", a);
+      continue;
+    }
+
+    diag.contabilizadas++;
 
     if (!orgsTrabalhadasPorOwner.has(owner)) {
       orgsTrabalhadasPorOwner.set(owner, new Set());
@@ -141,7 +194,7 @@ async function calcular() {
   const abordados = porVendedor.reduce((s, v) => s + v.abordados, 0);
   const pct_geral = total > 0 ? Math.round((abordados / total) * 100) : 0;
 
-  return {
+  const resultado = {
     mes: nomeMesAtual(),
     gerado_em: new Date().toISOString(),
     total_carteira: total,
@@ -149,19 +202,33 @@ async function calcular() {
     pct_cobertura_geral: pct_geral,
     por_vendedor: porVendedor,
   };
+
+  if (debug) {
+    resultado._debug = {
+      ...diag,
+      total_deals_no_funil_vendas: dealsResult.length,
+      intervalo_mes: { inicio: inicio.toISOString(), fim: fim.toISOString() },
+    };
+  }
+
+  return resultado;
 }
 
 export async function GET(request) {
   try {
     const url = new URL(request.url);
     const forceRefresh = url.searchParams.has("refresh");
+    const debug = url.searchParams.has("debug");
 
-    if (!forceRefresh && cache && Date.now() - cache.at < CACHE_MS) {
+    // Modo debug sempre ignora cache, pra refletir a realidade agora.
+    if (!debug && !forceRefresh && cache && Date.now() - cache.at < CACHE_MS) {
       return NextResponse.json({ ...cache.data, _cached: true });
     }
-    const data = await calcular();
+    const data = await calcular({ debug });
     if (data.erro) return NextResponse.json({ erro: data.erro }, { status: 500 });
-    cache = { at: Date.now(), data };
+    if (!debug) {
+      cache = { at: Date.now(), data };
+    }
     return NextResponse.json({ ...data, _cached: false });
   } catch (err) {
     return NextResponse.json(
