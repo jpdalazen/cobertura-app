@@ -65,7 +65,7 @@ async function calcular({ debug = false } = {}) {
   // Busca SEM start_date/end_date propositalmente no modo debug, pra não
   // arriscar cortar atividades por causa do filtro de due_date. Filtramos
   // tudo manualmente abaixo, usando marked_as_done_time.
-  const activitiesPromise = fetchAllPaginated(`${BASE}/activities?done=1`);
+const activitiesPromise = fetchAllPaginated(`${BASE}/activities?done=1&user_id=0`);
 
   const [dealsResult, activitiesResult, ...orgsResults] = await Promise.all([
     dealsPromise,
