@@ -4,14 +4,9 @@ import { VENDEDORES, PIPELINE_VENDAS_ID } from "../../../lib/pipedrive-config";
 const TOKEN = process.env.PIPEDRIVE_API_TOKEN;
 const BASE = "https://api.pipedrive.com/v1";
 
-// Cache em memória: guarda o resultado por 15 minutos para não ficar
-// batendo na API do Pipedrive a cada refresh. Sobrevive por instância
-// da função — em uso normal na Vercel, funciona bem.
 let cache = null;
-
 const CACHE_MS = 15 * 60 * 1000;
 
-// Paginação dos endpoints antigos da Pipedrive: usa start/limit, não cursor.
 async function fetchAllPaginated(url) {
   const items = [];
   let start = 0;
@@ -34,10 +29,11 @@ async function fetchAllPaginated(url) {
   return items;
 }
 
-function inicioMesAtualISO() {
+function limitesMesAtual() {
   const agora = new Date();
   const inicio = new Date(agora.getFullYear(), agora.getMonth(), 1, 0, 0, 0);
-  return inicio.toISOString();
+  const fim = new Date(agora.getFullYear(), agora.getMonth() + 1, 1, 0, 0, 0);
+  return { inicio, fim };
 }
 
 function nomeMesAtual() {
@@ -54,24 +50,36 @@ async function calcular() {
     return { erro: "Token do Pipedrive não configurado no servidor." };
   }
 
+  const { inicio, fim } = limitesMesAtual();
+
   const orgsPromises = VENDEDORES.map((v) =>
     fetchAllPaginated(`${BASE}/organizations?user_id=${v.owner_id}`).then(
       (orgs) => ({ vendedor: v, orgs })
     )
   );
+
+  // Todos os deals do funil de Vendas (sem filtro de data — precisamos
+  // deles para saber a qual org/dono uma atividade pertence, mesmo que
+  // o deal tenha sido criado em outro mês).
   const dealsPromise = fetchAllPaginated(
     `${BASE}/deals?pipeline_id=${PIPELINE_VENDAS_ID}&status=all_not_deleted`
   );
 
-  const [dealsResult, ...orgsResults] = await Promise.all([
+  // Atividades concluídas. Filtramos por data como otimização (due_date),
+  // mas o corte real é feito depois usando marked_as_done_time.
+  const dataIni = inicio.toISOString().split("T")[0];
+  const dataFim = fim.toISOString().split("T")[0];
+  const activitiesPromise = fetchAllPaginated(
+    `${BASE}/activities?done=1&start_date=${dataIni}&end_date=${dataFim}`
+  );
+
+  const [dealsResult, activitiesResult, ...orgsResults] = await Promise.all([
     dealsPromise,
+    activitiesPromise,
     ...orgsPromises,
   ]);
 
-  const inicioMes = inicioMesAtualISO();
-  const dealsMes = dealsResult.filter(
-    (d) => d.add_time && new Date(d.add_time) >= new Date(inicioMes)
-  );
+  const dealsPorId = new Map(dealsResult.map((d) => [d.id, d]));
 
   const orgsPorVendedor = new Map();
   for (const { vendedor, orgs } of orgsResults) {
@@ -81,17 +89,25 @@ async function calcular() {
     });
   }
 
-  // Quais organizações receberam ao menos 1 negócio novo neste mês,
-  // agrupado por dono do negócio.
+  // Quais organizações tiveram ao menos 1 atividade realizada neste mês,
+  // em um deal do funil de Vendas, agrupado por dono do deal.
   const orgsTrabalhadasPorOwner = new Map();
-  for (const d of dealsMes) {
-    if (!d.org_id?.value) continue;
-    const owner = d.user_id?.value ?? d.owner_id?.id;
+  for (const a of activitiesResult) {
+    if (!a.done || !a.deal_id || !a.marked_as_done_time) continue;
+
+    const quando = new Date(a.marked_as_done_time);
+    if (quando < inicio || quando >= fim) continue;
+
+    const deal = dealsPorId.get(a.deal_id);
+    if (!deal || !deal.org_id?.value) continue;
+
+    const owner = deal.user_id?.value ?? deal.owner_id?.id;
     if (!owner) continue;
+
     if (!orgsTrabalhadasPorOwner.has(owner)) {
       orgsTrabalhadasPorOwner.set(owner, new Set());
     }
-    orgsTrabalhadasPorOwner.get(owner).add(d.org_id.value);
+    orgsTrabalhadasPorOwner.get(owner).add(deal.org_id.value);
   }
 
   const porVendedor = VENDEDORES.map((v) => {
@@ -99,7 +115,6 @@ async function calcular() {
     const carteira = entrada.orgs;
     const trabalhadasGlobal =
       orgsTrabalhadasPorOwner.get(v.owner_id) ?? new Set();
-    // Só conta como "trabalhada" quem faz parte da carteira atual dele.
     const trabalhadasDaCarteira = [...trabalhadasGlobal].filter((oid) =>
       carteira.has(oid)
     );
